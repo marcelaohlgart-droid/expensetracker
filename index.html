@@ -844,7 +844,33 @@
 </head>
 <body>
 
+<!-- ── Auth gate: shown until signed in ──────────────────────────────── -->
+<div id="auth-overlay" style="position:fixed;inset:0;background:#f5f5f7;display:none;align-items:center;justify-content:center;z-index:1000;padding:20px;">
+  <div class="card" style="max-width:340px;width:100%;">
+    <div class="card-title"><div class="icon">$</div>Sign in</div>
+    <div style="display:grid;gap:12px;">
+      <div>
+        <label>Email</label>
+        <input type="email" id="auth-email" autocomplete="username" />
+      </div>
+      <div>
+        <label>Password</label>
+        <input type="password" id="auth-password" autocomplete="current-password" />
+      </div>
+      <div id="auth-error" style="color:#ef4444;font-size:0.85rem;display:none;"></div>
+      <div style="display:flex;gap:10px;">
+        <button class="btn btn-primary" id="auth-signin-btn" style="flex:1;">Sign In</button>
+        <button class="btn btn-ghost" id="auth-signup-btn" style="flex:1;">Sign Up</button>
+      </div>
+      <div id="auth-status" style="font-size:0.8rem;color:#6b7280;"></div>
+    </div>
+  </div>
+</div>
+
+<div id="app-root" style="display:none">
+
 <header>
+  <span id="sync-status" style="font-size:0.72rem;color:#6b7280;order:99;width:100%;text-align:right;"></span>
   <h1>Expense <span>Tracker</span></h1>
   <div class="view-tabs">
     <button class="view-tab active" id="tab-dashboard">Dashboard</button>
@@ -1129,6 +1155,9 @@
 
 </div><!-- end #view-travel -->
 
+</div><!-- end #app-root -->
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
   const CATEGORIES = [
     'Food & Drinks','Groceries','Rent','House Expenses',
@@ -1146,6 +1175,124 @@
   ];
 
   const catColor = cat => CAT_COLORS[CATEGORIES.indexOf(cat)] ?? '#94a3b8';
+
+  // ── Cloud sync (Supabase) ────────────────────────────────────────────
+  // Mirrors localStorage as a key/value table so existing load/save
+  // functions barely change. Reads stay synchronous (from localStorage);
+  // writes fire an async upsert to Supabase in the background.
+  const SUPABASE_URL = 'https://nbfisglxzfgjaybwegxa.supabase.co';
+  const SUPABASE_ANON_KEY = 'sb_publishable_dEe8Q-V3CqjLzW7l0sg3AA_Djnbm9Gf';
+  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const SYNCED_KEY_PATTERN = /^(expenses_\d{4}_\d{2}|budgets|recurring|travel_expenses|travel_trips)$/;
+
+  function localSyncedKeys() {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (SYNCED_KEY_PATTERN.test(k)) keys.push(k);
+    }
+    return keys;
+  }
+
+  function setSyncStatus(msg) {
+    const el = document.getElementById('sync-status');
+    if (el) el.textContent = msg;
+  }
+
+  function cloudPushKey(key) {
+    let value;
+    try { value = JSON.parse(localStorage.getItem(key)); } catch { value = null; }
+    setSyncStatus('Syncing…');
+    sb.from('kv_store').upsert({ key, value }, { onConflict: 'user_id,key' })
+      .then(({ error }) => {
+        if (error) { console.warn('Cloud push failed:', key, error); setSyncStatus('Sync error'); }
+        else setSyncStatus('Synced');
+      });
+  }
+
+  async function cloudPushAll() {
+    const keys = localSyncedKeys();
+    if (!keys.length) return;
+    const rows = keys.map(k => {
+      let value;
+      try { value = JSON.parse(localStorage.getItem(k)); } catch { value = null; }
+      return { key: k, value };
+    });
+    const { error } = await sb.from('kv_store').upsert(rows, { onConflict: 'user_id,key' });
+    if (error) console.warn('Cloud push (bulk) failed:', error);
+  }
+
+  async function cloudPullAll() {
+    const { data, error } = await sb.from('kv_store').select('key,value');
+    if (error) { console.warn('Cloud pull failed:', error); return false; }
+    data.forEach(row => localStorage.setItem(row.key, JSON.stringify(row.value)));
+    return true;
+  }
+
+  function setAuthError(msg) {
+    const el = document.getElementById('auth-error');
+    el.textContent = msg;
+    el.style.display = msg ? '' : 'none';
+  }
+  function setAuthStatus(msg) {
+    document.getElementById('auth-status').textContent = msg || '';
+  }
+
+  async function doAuth(mode) {
+    const email = document.getElementById('auth-email').value.trim();
+    const password = document.getElementById('auth-password').value;
+    setAuthError('');
+    setAuthStatus(mode === 'signup' ? 'Creating account…' : 'Signing in…');
+    const { data, error } = mode === 'signup'
+      ? await sb.auth.signUp({ email, password })
+      : await sb.auth.signInWithPassword({ email, password });
+    if (error) { setAuthStatus(''); setAuthError(error.message); return; }
+    if (mode === 'signup' && !data.session) {
+      setAuthStatus('Check your email to confirm the account, then sign in.');
+      return;
+    }
+    await startApp();
+  }
+
+  async function startApp() {
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.getElementById('app-root').style.display = '';
+    setSyncStatus('Syncing…');
+
+    const { count, error: countErr } = await sb
+      .from('kv_store')
+      .select('key', { count: 'exact', head: true });
+
+    if (!countErr && count === 0 && localSyncedKeys().length > 0) {
+      // First run against a fresh Supabase project: push this device's
+      // existing local data up as the seed copy.
+      await cloudPushAll();
+    } else {
+      await cloudPullAll();
+    }
+    setSyncStatus('Synced');
+
+    init();
+
+    // Background re-sync so a change made on the other device shows up here.
+    setInterval(async () => { await cloudPullAll(); render(); }, 30000);
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible') { await cloudPullAll(); render(); }
+    });
+  }
+
+  async function initAuth() {
+    document.getElementById('auth-signin-btn').addEventListener('click', () => doAuth('signin'));
+    document.getElementById('auth-signup-btn').addEventListener('click', () => doAuth('signup'));
+
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      await startApp();
+    } else {
+      document.getElementById('auth-overlay').style.display = 'flex';
+    }
+  }
 
   const BUCKETS = [
     {
@@ -1183,6 +1330,7 @@
 
   function saveExpenses(y, m, data) {
     localStorage.setItem(storageKey(y, m), JSON.stringify(data));
+    cloudPushKey(storageKey(y, m));
   }
 
   function loadBudgets() {
@@ -1192,6 +1340,7 @@
 
   function saveBudgets(b) {
     localStorage.setItem(budgetKey(), JSON.stringify(b));
+    cloudPushKey(budgetKey());
   }
 
   function loadRecurring() {
@@ -1201,6 +1350,7 @@
 
   function saveRecurring(arr) {
     localStorage.setItem('recurring', JSON.stringify(arr));
+    cloudPushKey('recurring');
   }
 
   function getExpensesForMonth(y, m) {
@@ -1262,13 +1412,19 @@
     try { return JSON.parse(localStorage.getItem('travel_expenses')) || []; }
     catch { return []; }
   }
-  function saveTravelExpenses(data) { localStorage.setItem('travel_expenses', JSON.stringify(data)); }
+  function saveTravelExpenses(data) {
+    localStorage.setItem('travel_expenses', JSON.stringify(data));
+    cloudPushKey('travel_expenses');
+  }
 
   function loadTrips() {
     try { return JSON.parse(localStorage.getItem('travel_trips')) || []; }
     catch { return []; }
   }
-  function saveTrips(t) { localStorage.setItem('travel_trips', JSON.stringify(t)); }
+  function saveTrips(t) {
+    localStorage.setItem('travel_trips', JSON.stringify(t));
+    cloudPushKey('travel_trips');
+  }
 
   let currentTrip = null;
   let travelEditingId = null;
@@ -2053,7 +2209,7 @@
     return Date.now().toString(36) + Math.random().toString(36).slice(2);
   }
 
-  init();
+  initAuth();
 
   // ── PWA: generate apple-touch-icon ──────────────────────────────────────
   // iOS requires a PNG for the home screen icon; we draw it with canvas so
