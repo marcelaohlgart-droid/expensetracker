@@ -457,13 +457,50 @@
       font-weight: 600;
       color: var(--text-muted);
       white-space: nowrap;
+      /* sit above the Avg line so the line never strikes through a value */
+      z-index: 2;
+      background: var(--surface);
+      padding: 0 3px;
+      border-radius: 3px;
     }
     .chart-col--active .chart-label-top { color: var(--accent); }
     .chart-label-month {
       font-size: 0.72rem;
       color: var(--text-muted);
       margin-top: 6px;
+      height: 14px;        /* fixed so the Avg line can align with the bar area */
+      line-height: 14px;
       text-align: center;
+    }
+    /* Avg line: covers exactly the bar area (below the 32px top padding, above
+       the 20px month-label row) so its % position matches the bar heights. */
+    .chart-avg-layer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 32px;
+      bottom: 20px;
+      pointer-events: none;
+    }
+    .chart-avg-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 0;
+      border-top: 2px dashed var(--text);
+      opacity: 0.7;
+    }
+    .chart-avg-tag {
+      position: absolute;
+      right: 0;
+      bottom: 3px;
+      font-size: 0.66rem;
+      font-weight: 700;
+      line-height: 1.3;
+      color: var(--text);
+      background: var(--surface);
+      border-radius: 4px;
+      padding: 0 4px;
     }
     .chart-zero-state {
       display: flex;
@@ -630,6 +667,25 @@
       letter-spacing: -0.5px;
     }
     .dash-stat.accent .dash-stat-value { color: #fff; }
+    .dash-stat-sub {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+      min-height: 1em;
+    }
+    /* Four stat cards: 2x2 on phones/tablets, one row of four on wide screens */
+    @media (max-width: 713px) {
+      .dash-stats { grid-template-columns: 1fr 1fr; }
+    }
+    /* Phones: slightly tighter cards so 2x2 fits even with amounts like $1,499.00 */
+    @media (max-width: 420px) {
+      .dash-stat { padding: 16px; }
+      .dash-stat-value { font-size: 1.5rem; }
+    }
+    /* Very narrow phones: stack, so large amounts never overflow a card */
+    @media (max-width: 339px) {
+      .dash-stats { grid-template-columns: 1fr; }
+    }
 
     @media (min-width: 680px) {
       .dash-two-col {
@@ -900,6 +956,11 @@
       <div class="dash-stat-label">Remaining</div>
       <div class="dash-stat-value" id="dash-remaining">—</div>
     </div>
+    <div class="dash-stat">
+      <div class="dash-stat-label">Average Monthly Spending</div>
+      <div class="dash-stat-value" id="dash-avg">—</div>
+      <div class="dash-stat-sub" id="dash-avg-sub"></div>
+    </div>
   </div>
 
   <!-- Donut + Top 3 -->
@@ -918,6 +979,15 @@
       </div>
       <div id="dash-top3"></div>
     </div>
+  </div>
+
+  <!-- 6-Month Spending Trend -->
+  <div class="card">
+    <div class="card-title">
+      <div class="icon">&#9656;</div>
+      6-Month Spending Trend
+    </div>
+    <div class="chart-wrap" id="chart-wrap"></div>
   </div>
 
   <!-- Spending Overview -->
@@ -1013,15 +1083,6 @@
       </div>
     </div>
 
-  </div>
-
-  <!-- 6-Month Spending Trend -->
-  <div class="card">
-    <div class="card-title">
-      <div class="icon">&#9656;</div>
-      6-Month Spending Trend
-    </div>
-    <div class="chart-wrap" id="chart-wrap"></div>
   </div>
 
   <!-- Category Breakdown -->
@@ -1372,6 +1433,51 @@
     return getExpensesForMonth(y, m).reduce((s, e) => s + e.amount, 0);
   }
 
+  // All-time average monthly spending (Tracker expenses only; the Travel tab
+  // lives in its own store and is never read here).
+  // Range: month of the earliest dated expense through the last COMPLETED
+  // calendar month (today's month is excluded). Months with no spending count
+  // as 0. Each month's total comes from getMonthTotal(), which adds one
+  // virtual entry per recurring template per month, so "Repeat monthly"
+  // expenses count exactly once per month.
+  // Returns null when there is no completed month yet.
+  function getAverageMonthlySpending() {
+    let first = null; // month index = year * 12 + (month - 1)
+    localSyncedKeys().forEach(k => {
+      const mt = /^expenses_(\d{4})_(\d{2})$/.exec(k);
+      if (!mt) return;
+      const y = Number(mt[1]), m = Number(mt[2]);
+      if (!loadExpenses(y, m).length) return;
+      const idx = y * 12 + (m - 1);
+      if (first === null || idx < first) first = idx;
+    });
+
+    const now  = new Date();
+    const last = now.getFullYear() * 12 + now.getMonth() - 1; // last completed month
+    if (first === null || first > last) return null;
+
+    let total = 0;
+    for (let i = first; i <= last; i++) {
+      total += getMonthTotal(Math.floor(i / 12), (i % 12) + 1);
+    }
+    const months = last - first + 1;
+    return {
+      avg: total / months,
+      months,
+      startYear: Math.floor(first / 12), startMonth: (first % 12) + 1,
+      endYear:   Math.floor(last / 12),  endMonth:   (last % 12) + 1
+    };
+  }
+
+  function averageRangeLabel(a) {
+    const mon = (y, m) => new Date(y, m - 1, 1).toLocaleString('default', { month: 'short' });
+    const sameYear = a.startYear === a.endYear;
+    const from = mon(a.startYear, a.startMonth) + (sameYear ? '' : ' ' + a.startYear);
+    const to   = mon(a.endYear, a.endMonth)     + (sameYear ? '' : ' ' + a.endYear);
+    const span = a.months === 1 ? from : `${from}–${to}`;
+    return `${span}, ${a.months} ${a.months === 1 ? 'month' : 'months'}`;
+  }
+
   function get6MonthWindow(y, m) {
     const months = [];
     for (let i = 5; i >= 0; i--) {
@@ -1704,7 +1810,6 @@
       renderExpenses();
       renderBreakdown();
       renderSummary();
-      renderChart();
     } else if (currentView === 'travel') {
       renderTravel();
     }
@@ -1729,8 +1834,15 @@
       remEl.className = 'dash-stat-value ' + (remaining >= 0 ? 'green' : 'red');
     }
 
+    const avgInfo = getAverageMonthlySpending();
+    document.getElementById('dash-avg').textContent =
+      avgInfo ? fmt(avgInfo.avg) : '—';
+    document.getElementById('dash-avg-sub').textContent =
+      avgInfo ? averageRangeLabel(avgInfo) : 'No completed month yet';
+
     renderDonut(expenses, total);
     renderTop3(expenses);
+    renderChart(avgInfo);
     renderOverview(expenses, total);
     renderCategoryBreakdown(expenses);
   }
@@ -1891,15 +2003,24 @@
     el.innerHTML = `<div class="cat-breakdown">${sections}</div>`;
   }
 
-  function renderChart() {
+  function renderChart(avgInfo) {
     const wrap = document.getElementById('chart-wrap');
     const months = get6MonthWindow(currentYear, currentMonth);
-    const maxTotal = Math.max(...months.map(m => m.total), 1);
+    // The Avg line is the all-time average, so it can sit above every bar shown;
+    // include it in the scale so it always stays inside the chart.
+    const maxTotal = Math.max(...months.map(m => m.total), avgInfo ? avgInfo.avg : 0, 1);
 
     if (months.every(m => m.total === 0)) {
       wrap.innerHTML = `<div class="chart-zero-state">No spending data for the last 6 months.</div>`;
       return;
     }
+
+    const avgLine = avgInfo ? `
+      <div class="chart-avg-layer">
+        <div class="chart-avg-line" style="bottom:${(avgInfo.avg / maxTotal * 100).toFixed(2)}%">
+          <span class="chart-avg-tag">Avg</span>
+        </div>
+      </div>` : '';
 
     wrap.innerHTML = months.map(({ year, month, label, total }) => {
       const isActive = year === currentYear && month === currentMonth;
@@ -1913,7 +2034,7 @@
           </div>
           <div class="chart-label-month">${label}</div>
         </div>`;
-    }).join('');
+    }).join('') + avgLine;
   }
 
   function renderSummary() {
