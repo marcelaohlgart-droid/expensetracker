@@ -1059,6 +1059,24 @@
             <select id="exp-cat" required></select>
           </div>
           <div class="full">
+            <label for="exp-trip">Add to trip (optional)</label>
+            <select id="exp-trip"></select>
+          </div>
+          <div id="exp-trip-extra" class="full" style="display:none">
+            <div class="form-grid">
+              <div>
+                <label for="exp-travel-cat">Travel category</label>
+                <select id="exp-travel-cat"></select>
+              </div>
+              <div style="display:flex; align-items:flex-end">
+                <div class="recurring-row">
+                  <input type="checkbox" id="exp-travel-paid" checked />
+                  <label for="exp-travel-paid" class="recurring-check-label">Paid</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="full">
             <div class="recurring-row">
               <input type="checkbox" id="exp-recurring" />
               <label for="exp-recurring" class="recurring-check-label">Repeat monthly</label>
@@ -1741,6 +1759,77 @@
     document.getElementById('tv-clear-btn').textContent       = 'Clear';
   }
 
+  // ── Link tracker expenses to trips ──────────────────────────
+  // A travel entry created from the tracker stores `sourceId` = id of the
+  // tracker expense it mirrors. Edits/deletes in the tracker keep it in sync.
+  const TRAVEL_CAT_MAP = {
+    'Food & Drinks': 'Food',
+    'Groceries': 'Food',
+    'Rent': 'Accommodation',
+    'Transportation': 'Transportation',
+    'Going Out': 'Going Out',
+    'Activities & Entertainment': 'Activities'
+  };
+  let travelCatTouched = false;
+
+  function suggestTravelCat(cat) { return TRAVEL_CAT_MAP[cat] || 'Other'; }
+
+  function refreshExpenseTripSelect() {
+    const sel = document.getElementById('exp-trip');
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">— None —</option>' +
+      loadTrips().map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join('');
+    sel.value = loadTrips().includes(prev) ? prev : '';
+    updateTripExtra();
+  }
+
+  function updateTripExtra() {
+    const hasTrip = !!document.getElementById('exp-trip').value;
+    document.getElementById('exp-trip-extra').style.display = hasTrip ? '' : 'none';
+    if (hasTrip && !travelCatTouched) {
+      document.getElementById('exp-travel-cat').value =
+        suggestTravelCat(document.getElementById('exp-cat').value);
+    }
+  }
+
+  function syncTravelLink(expense) {
+    const trip = document.getElementById('exp-trip').value;
+    const all  = loadTravelExpenses();
+    const idx  = all.findIndex(x => x.sourceId === expense.id);
+    if (!trip) {
+      if (idx !== -1) { all.splice(idx, 1); saveTravelExpenses(all); }
+      return;
+    }
+    const fields = {
+      name: expense.name, amount: expense.amount, date: expense.date,
+      category: document.getElementById('exp-travel-cat').value,
+      paid: document.getElementById('exp-travel-paid').checked,
+      trip, sourceId: expense.id
+    };
+    if (idx !== -1) all[idx] = { ...all[idx], ...fields };
+    else all.push({ id: uid(), ...fields });
+    saveTravelExpenses(all);
+  }
+
+  function initTripLink() {
+    const travelSel = document.getElementById('exp-travel-cat');
+    TRAVEL_CATS.forEach(c => {
+      const o = document.createElement('option');
+      o.value = c; o.textContent = c;
+      travelSel.appendChild(o);
+    });
+    document.getElementById('exp-trip').addEventListener('change', updateTripExtra);
+    document.getElementById('exp-cat').addEventListener('change', updateTripExtra);
+    travelSel.addEventListener('change', () => { travelCatTouched = true; });
+    // Recurring templates can't be linked to a trip
+    document.getElementById('exp-recurring').addEventListener('change', function () {
+      const tripSel = document.getElementById('exp-trip');
+      if (this.checked) { tripSel.value = ''; updateTripExtra(); }
+      tripSel.disabled = this.checked;
+    });
+    refreshExpenseTripSelect();
+  }
+
   // Init
   function init() {
     const now = new Date();
@@ -1761,6 +1850,7 @@
     document.getElementById('tab-dashboard').addEventListener('click', () => switchView('dashboard'));
     document.getElementById('tab-tracker').addEventListener('click', () => switchView('tracker'));
     initTravel();
+    initTripLink();
 
     document.getElementById('expense-form').addEventListener('submit', onAddExpense);
     document.getElementById('clear-btn').addEventListener('click', clearForm);
@@ -1807,6 +1897,7 @@
     if (currentView === 'dashboard') {
       renderDashboard();
     } else if (currentView === 'tracker') {
+      refreshExpenseTripSelect();
       renderExpenses();
       renderBreakdown();
       renderSummary();
@@ -2072,6 +2163,9 @@
     // Sort newest first; recurring items sort by their derived date
     const sorted = [...expenses].sort((a, b) => b.date.localeCompare(a.date));
 
+    const tripBySource = new Map(
+      loadTravelExpenses().filter(x => x.sourceId).map(x => [x.sourceId, x.trip]));
+
     list.innerHTML = sorted.map(e => {
       if (e.recurring && e.id === editingId) {
         return `
@@ -2092,7 +2186,7 @@
           <div class="cat-dot" style="background:${catColor(e.category)}"></div>
           <div class="expense-info">
             <div class="expense-name">${esc(e.name)}${e.recurring ? '<span class="recur-badge">&#8635; monthly</span>' : ''}</div>
-            <div class="expense-meta">${esc(e.category)} &middot; ${formatDate(e.date)}</div>
+            <div class="expense-meta">${esc(e.category)} &middot; ${formatDate(e.date)}${tripBySource.has(e.id) ? ' &middot; &#9992; ' + esc(tripBySource.get(e.id)) : ''}</div>
           </div>
           <div class="expense-amount">${fmt(e.amount)}</div>
           <button class="edit-btn" data-id="${e.id}" data-recurring="${e.recurring ? '1' : ''}"
@@ -2223,6 +2317,22 @@
     document.getElementById('exp-recurring').checked  = false;
     document.getElementById('exp-recurring').disabled = true;
 
+    // Pre-fill trip link, if this expense is mirrored on a trip
+    refreshExpenseTripSelect();
+    const linked = loadTravelExpenses().find(x => x.sourceId === expense.id);
+    const tripSel = document.getElementById('exp-trip');
+    tripSel.disabled = false;
+    if (linked) {
+      tripSel.value = linked.trip;
+      travelCatTouched = true;
+      document.getElementById('exp-travel-cat').value    = linked.category;
+      document.getElementById('exp-travel-paid').checked = !!linked.paid;
+    } else {
+      tripSel.value = '';
+      travelCatTouched = false;
+    }
+    updateTripExtra();
+
     document.getElementById('form-icon').textContent       = '✎';
     document.getElementById('form-title-text').textContent = 'Edit Expense';
     document.getElementById('submit-btn').textContent      = 'Save Changes';
@@ -2251,6 +2361,7 @@
       const updated = { id: editingExpenseId, name, amount, date, category };
       dest.push(updated);
       saveExpenses(y, m, dest);
+      syncTravelLink(updated);
       currentYear = y; currentMonth = m;
       clearForm();
       render();
@@ -2266,6 +2377,7 @@
     } else {
       const [y, m] = date.split('-').map(Number);
       const newExpense = { id: uid(), name, amount, date, category };
+      syncTravelLink(newExpense);
       if (y !== currentYear || m !== currentMonth) {
         const expenses = loadExpenses(y, m);
         expenses.push(newExpense);
@@ -2293,6 +2405,11 @@
     } else {
       const expenses = loadExpenses(currentYear, currentMonth);
       saveExpenses(currentYear, currentMonth, expenses.filter(e => e.id !== id));
+      // Also remove the mirrored travel entry, if any
+      const travel = loadTravelExpenses();
+      if (travel.some(x => x.sourceId === id)) {
+        saveTravelExpenses(travel.filter(x => x.sourceId !== id));
+      }
     }
     render();
   }
@@ -2304,6 +2421,11 @@
     document.getElementById('exp-cat').selectedIndex = 0;
     document.getElementById('exp-recurring').checked  = false;
     document.getElementById('exp-recurring').disabled = false;
+    document.getElementById('exp-trip').disabled = false;
+    document.getElementById('exp-trip').value = '';
+    document.getElementById('exp-travel-paid').checked = true;
+    travelCatTouched = false;
+    updateTripExtra();
 
     editingExpenseId  = null;
     editingExpenseSrc = null;
